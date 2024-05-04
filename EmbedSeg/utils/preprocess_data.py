@@ -4,6 +4,7 @@ import subprocess as sp
 import urllib.request
 import zipfile
 from glob import glob
+import nrrd
 
 import numpy as np
 import tifffile
@@ -239,7 +240,7 @@ def split_train_crops(
 
 
 def split_train_val(
-    data_dir, project_name, train_val_name, subset=0.15, by_fraction=True, seed=1000
+    data_dir, project_name, train_val_name, subset=0.15, by_fraction=True, seed=1000, data_type='tif'
 ):
     """
     Splits the `train` directory into `val` directory
@@ -272,8 +273,8 @@ def split_train_val(
     instance_dir = os.path.join(
         data_dir, project_name, "download", train_val_name, "masks"
     )
-    image_names = sorted(glob(os.path.join(image_dir, "*.tif")))
-    instance_names = sorted(glob(os.path.join(instance_dir, "*.tif")))
+    image_names = sorted(glob(os.path.join(image_dir, f"*.{data_type}")))
+    instance_names = sorted(glob(os.path.join(instance_dir, f"*.{data_type}")))
     indices = np.arange(len(image_names))
     np.random.seed(seed)
     np.random.shuffle(indices)
@@ -325,9 +326,131 @@ def split_train_val(
         )
     )
 
+def split_train_test_val_nrrd_scrolls(
+    data_dir, project_name, kernel_size=64, subset_test=0.1, subset_val=0.1, by_fraction=True, seed=1000, data_type='nrrd'
+):
+    """
+    Splits the `train` directory into `test` directory
+    using the partition percentage of `subset`.
+
+    Parameters
+    ----------
+    data_dir: string
+        Indicates the path where the `project` lives.
+    project_name: string
+        Indicates the name of the sub-folder under the location
+        identified by `data_dir`.
+    train_test_name: string
+        Indicates the name of the sub-directory under `project-name`
+        which must be split
+    subset: float
+        Indicates the fraction of data to be reserved for evaluation
+    seed: integer
+        Allows for the same partition to be used
+        in each experiment.
+        Change this if you would like to obtain results
+        with different train-test partitions.
+
+    Returns
+    -------
+    """
+
+    volume_dir = os.path.join(
+        data_dir, "volumes"
+    )
+    instance_dir = os.path.join(
+        data_dir, "masks"
+    )
+    volume_names = sorted(glob(os.path.join(volume_dir, f"*.{data_type}")))
+    instance_names = sorted(glob(os.path.join(instance_dir, f"*.{data_type}")))
+
+    volumes = []
+    instances = []
+    for volume_name, instance_name in zip(volume_names, instance_names):
+        volume = nrrd.read(volume_name)[0]
+        instance = nrrd.read(instance_name)[0]
+        split_volumes, split_instances = split_3d_kernels(kernel_size, [volume], [instance])
+        volumes += split_volumes
+        instances += split_instances
+
+    indices = np.arange(len(volumes))
+    print(f"Indices: {indices}")
+    train_indices = indices[:int(len(indices) * (1 - subset_val - subset_test))]
+    val_indices = indices[int(len(indices) * (1 - subset_val - subset_test)):int(len(indices) * (1 - subset_test))]
+    test_indices = indices[int(len(indices) * (1 - subset_test)):]
+    print(f"Train indices: {train_indices}")
+    print(f"Val indices: {val_indices}")
+    print(f"Test indices: {test_indices}")
+    train_volume_dir = os.path.join(data_dir, "train", "volumes")
+    train_instance_dir = os.path.join(data_dir, "train", "instances")
+    val_volume_dir = os.path.join(data_dir, "val", "volumes")
+    val_instance_dir = os.path.join(data_dir, "val", "instances")
+    test_volume_dir = os.path.join(data_dir, "test", "volumes")
+    test_instance_dir = os.path.join(data_dir, "test", "instances")
+
+    # Create directories for train, val, and test data
+    os.makedirs(train_volume_dir, exist_ok=True)
+    os.makedirs(train_instance_dir, exist_ok=True)
+    os.makedirs(val_volume_dir, exist_ok=True)
+    os.makedirs(val_instance_dir, exist_ok=True)
+    os.makedirs(test_volume_dir, exist_ok=True)
+    os.makedirs(test_instance_dir, exist_ok=True)
+
+    for train_index in train_indices:
+        train_volume_path = os.path.join(train_volume_dir, f"volume_{train_index}.{data_type}")
+        train_instance_path = os.path.join(train_instance_dir, f"instance_{train_index}.{data_type}")
+        nrrd.write(train_volume_path, volumes[train_index])
+        nrrd.write(train_instance_path, instances[train_index])
+        
+
+    for val_index in val_indices:
+        val_volume_path = os.path.join(val_volume_dir, f"volume_{val_index}.{data_type}")
+        val_instance_path = os.path.join(val_instance_dir, f"instance_{val_index}.{data_type}")
+        nrrd.write(val_volume_path, volumes[val_index])
+        nrrd.write(val_instance_path, instances[val_index])
+
+    for test_index in test_indices:
+        test_volume_path = os.path.join(test_volume_dir, f"volume_{test_index}.{data_type}")
+        test_instance_path = os.path.join(test_instance_dir, f"instance_{test_index}.{data_type}")
+        nrrd.write(test_volume_path, volumes[test_index])
+        nrrd.write(test_instance_path, instances[test_index])
+   
+    
+def split_3d_kernels(kernel_size, volumes, instances):
+    """
+    Splits the 3D volumes and instances into smaller 3D kernels
+    of size `kernel_size`
+
+    Parameters
+    ----------
+    kernel_size: int
+        Size of the 3D kernel
+    volumes: list
+        List of 3D volumes
+    instances: list
+        List of 3D instances
+
+    Returns
+    -------
+    volumes: list
+        List of 3D kernels
+    instances: list
+        List of 3D kernels
+    """
+    new_volumes = []
+    new_instances = []
+    for volume, instance in zip(volumes, instances):
+        print(f"Volume shape: {volume.shape}")
+        z, y, x = volume.shape
+        for i in range(0, z, kernel_size):
+            for j in range(0, y, kernel_size):
+                for k in range(0, x, kernel_size):
+                    new_volumes.append(volume[i:i+kernel_size, j:j+kernel_size, k:k+kernel_size])
+                    new_instances.append(instance[i:i+kernel_size, j:j+kernel_size, k:k+kernel_size])
+    return new_volumes, new_instances
 
 def split_train_test(
-    data_dir, project_name, train_test_name, subset=0.5, by_fraction=True, seed=1000
+    data_dir, project_name, train_test_name, subset=0.5, by_fraction=True, seed=1000, data_type='tif'
 ):
     """
     Splits the `train` directory into `test` directory
@@ -361,8 +484,8 @@ def split_train_test(
     instance_dir = os.path.join(
         data_dir, project_name, "download", train_test_name, "masks"
     )
-    image_names = sorted(glob(os.path.join(image_dir, "*.tif")))
-    instance_names = sorted(glob(os.path.join(instance_dir, "*.tif")))
+    image_names = sorted(glob(os.path.join(image_dir, f"*.{data_type}")))
+    instance_names = sorted(glob(os.path.join(instance_dir, f"*.{data_type}")))
     indices = np.arange(len(image_names))
     np.random.seed(seed)
     np.random.shuffle(indices)
@@ -839,6 +962,98 @@ def calculate_avg_background_intensity(
 
 
 def get_data_properties(
+    data_dir,
+    project_name,
+    train_val_name,
+    test_name,
+    mode,
+    one_hot=False,
+    process_k=None,
+    anisotropy_factor=1.0,
+    background_id=0,
+):
+    """
+
+    Parameters
+    -------
+
+    data_dir: string
+            Path to directory containing all data
+    project_name: string
+            Path to directory containing project-specific images and instances
+    train_val_name: string
+            One of 'train' or 'val'
+    test_name: string
+            Name of test directory.
+    mode: string
+            One of '2d', '3d', '3d_sliced', '3d_ilp'
+    one_hot: boolean
+            set to True, if instances are encoded in a one-hot fashion
+    process_k (int, int)
+            first `int` argument in tuple specifies number of images
+            which must be processed
+            second `int` argument in tuple specifies number of ids
+            which must be processed
+    anisotropy_factor: float
+            Ratio of the real-world size of the z-dimension to the
+            x or y dimension in the raw images
+            If the image is down-sampled along the z-dimension,
+            then `anisotropy_factor` is greater than 1.0
+    background_id: int
+            Label id corresponding to the background
+
+    Returns
+    -------
+    data_properties_dir: dictionary
+            keys include `foreground_weight`, `min_object_size`,
+            `project_name`, `avg_background_intensity` etc
+
+    """
+    data_properties_dir = {}
+    data_properties_dir["foreground_weight"] = calculate_foreground_weight(
+        data_dir, project_name, train_val_name, mode, background_id=background_id
+    )
+    (
+        data_properties_dir["min_object_size"],
+        data_properties_dir["mean_object_size"],
+        data_properties_dir["max_object_size"],
+        data_properties_dir["avg_object_size_z"],
+        data_properties_dir["avg_object_size_y"],
+        data_properties_dir["avg_object_size_x"],
+        data_properties_dir["stdev_object_size_z"],
+        data_properties_dir["stdev_object_size_y"],
+        data_properties_dir["stdev_object_size_x"],
+    ) = calculate_object_size(
+        data_dir,
+        project_name,
+        train_val_name,
+        mode,
+        one_hot,
+        process_k,
+        background_id=background_id,
+    )
+    (
+        data_properties_dir["n_z"],
+        data_properties_dir["n_y"],
+        data_properties_dir["n_x"],
+    ) = calculate_max_eval_image_size(
+        data_dir=data_dir,
+        project_name=project_name,
+        test_name=test_name,
+        mode=mode,
+        anisotropy_factor=anisotropy_factor,
+    )
+    data_properties_dir["one_hot"] = one_hot
+    data_properties_dir[
+        "avg_background_intensity"
+    ] = calculate_avg_background_intensity(
+        data_dir, project_name, train_val_name, one_hot, background_id=background_id
+    )
+    data_properties_dir["project_name"] = project_name
+    return data_properties_dir
+
+
+def get_data_properties_nrrd(
     data_dir,
     project_name,
     train_val_name,

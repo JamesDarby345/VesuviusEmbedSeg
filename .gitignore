@@ -9,4 +9,5 @@ build/*
 dist/*
 *egg-info
 .vscode
+/manually_labelled_cubes
 
