@@ -591,6 +591,55 @@ def calculate_foreground_weight(
     )
     return np.mean(statistics)
 
+def calculate_foreground_weight_nrrd(
+    data_dir, project_name, train_val_name, mode, background_id=0
+):
+    """
+
+    Parameters
+    -------
+
+    data_dir: string
+        Name of directory containing data
+    project_name: string
+        Name of directory containing images and instances
+    train_val_name: string
+        one of 'train' or 'val'
+    mode: string
+        one of '2d' or '3d'
+    background_id: int, default
+        Id which corresponds to the background.
+
+    Returns
+    -------
+    float:
+        Ratio of the number of foreground pixels to the background pixels,
+        averaged over all available label masks
+
+    """
+    instance_names = []
+    for name in train_val_name:
+        instance_dir = os.path.join(data_dir, name, "instances")
+        instance_names += sorted(glob(os.path.join(instance_dir, "*.nrrd")))
+
+    statistics = []
+    for i in tqdm(range(len(instance_names)), position=0, leave=True):
+        ma = nrrd.read(instance_names[i])[0]
+        if mode in ["2d", "3d_sliced", "3d_ilp"]:
+            statistics.append(10.0)
+        elif mode == "3d":
+            z, y, x = np.where(ma == background_id)
+            len_bg = len(z)
+            z, y, x = np.where(ma > background_id)
+            len_fg = len(z)
+            statistics.append(len_bg / len_fg)
+    print(
+        "Foreground weight of the `{}` dataset set equal to {:.3f}".format(
+            project_name, np.mean(statistics)
+        )
+    )
+    return np.mean(statistics)
+
 
 def calculate_object_size(
     data_dir, project_name, train_val_name, mode, one_hot, process_k, background_id=0
@@ -1328,7 +1377,7 @@ def get_data_properties_nrrd(
 
     """
     data_properties_dir = {}
-    data_properties_dir["foreground_weight"] = calculate_foreground_weight(
+    data_properties_dir["foreground_weight"] = calculate_foreground_weight_nrrd(
         data_dir, project_name, train_val_name, mode, background_id=background_id
     )
     (

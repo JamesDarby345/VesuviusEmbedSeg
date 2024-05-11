@@ -9,6 +9,7 @@ from scipy.ndimage import zoom
 from scipy.ndimage.measurements import find_objects
 from scipy.ndimage.morphology import binary_fill_holes
 from tqdm import tqdm
+import nrrd
 
 
 def _fill_label_holes(lbl_img, **kwargs):
@@ -681,6 +682,217 @@ def process_3d(
                     center_image_crop,
                 )
             else:
+                tifffile.imsave(
+                    instance_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j),
+                    instance_crop.astype(np.uint16),
+                )
+                tifffile.imsave(
+                    center_image_path
+                    + os.path.basename(im)[:-4]
+                    + "_{:03d}.tif".format(j),
+                    center_image_crop,
+                )
+
+def process_3d_nrrd(
+    im,
+    inst,
+    crops_dir,
+    data_subset,
+    crop_size_x,
+    crop_size_y,
+    crop_size_z,
+    center,
+    norm="min-max-percentile",
+    one_hot=False,
+    anisotropy_factor=1.0,
+    speed_up=1.0,
+    data_type="8-bit",
+    normalization_factor=None,
+    rle_encode=False,
+    fraction_max_ids=1.0,
+    background_id=0,
+    uniform_ds_factor=1,
+):
+    """Entry function which generates 3D crops from 3D images
+
+    Parameters
+    ----------
+    im: numpy array
+        raw image
+    inst: numpy array
+        label mask
+    crops_dir: str
+        Path to where the crops are saved
+    data_subset: str
+        Set equal to one of `train` or `val`
+    crop_size_x: int
+        Width of crop
+    crop_size_y: int
+        Height of crop
+    crop_size_z: int
+        Depth of crop
+    center: str
+        Set equal to one of `centroid`, `medoid` or `approximate-medoid`
+    norm: str
+        Set equal to one of `min-max-percentile` or `absolute` or `mean-std`
+    one_hot: bool
+        If label masks are available in one-hot encoded fashion,
+        set `one_hot` equal to True
+        This parameter should be always set equal to False for 3D processing
+        and will be deprecated in a later release
+    anisotropy_factor: float
+        This parameter should be set equal to the ratio of the z pixel size
+        to the x or y pixel size
+        Here, we assume that the x or y pixel size is the same
+        (If the imaging is down-sampled in the z dimension,
+         `anisotropy_factor` is greater than 1.0)
+    data_type: str
+        Set equal to `8-bit` or `16-bit`
+    normalization_factor: int
+        In case, norm is set equal to `absolute`,
+        then the image intensities are divided by the `normalization_factor`
+    rle_encode: bool
+        If set equal to True, the label masks are saved as csv files
+    fraction_max_ids: float, between 0 and 1.0
+        If set equal to a value less than 1.0, then only that fraction of ids
+        are processed are used to make crops
+    background_id: int, optional
+        Id of the background in the label
+    uniform_ds_factor: int, optional
+        In case, the image and corresponding GT instance should be down-sampled
+        This serves the purpose of increasing the receptive field
+        without increasing the GPU memory requirement
+
+    Returns
+    -------
+    """
+
+    image_path = os.path.join(crops_dir, data_subset, "volumes/")
+    instance_path = os.path.join(crops_dir, data_subset, "instances/")
+    center_image_path = os.path.join(crops_dir, data_subset, "center-" + center + "/")
+
+    if not os.path.exists(image_path):
+        os.makedirs(os.path.dirname(image_path))
+        print("Created new directory : {}".format(image_path))
+    if not os.path.exists(instance_path):
+        os.makedirs(os.path.dirname(instance_path))
+        print("Created new directory : {}".format(instance_path))
+    if not os.path.exists(center_image_path):
+        os.makedirs(os.path.dirname(center_image_path))
+        print("Created new directory : {}".format(center_image_path))
+
+    instance = nrrd.read(inst)[0].astype(np.uint16)
+    image = nrrd.read(im)[0].astype(float)
+    # print(image.shape, instance.shape, norm)
+    if norm == "min-max-percentile":
+        image = normalize_min_max_percentile(image, 1, 99.8, axis=(0, 1, 2))
+    elif norm == "mean-std":
+        image = normalize_mean_std(image)
+    elif norm == "absolute":
+        if data_type == "8-bit":
+            if normalization_factor is None:
+                image /= 255
+            else:
+                image /= normalization_factor
+        elif data_type == "16-bit":
+            if normalization_factor is None:
+                image /= 65535
+            else:
+                image /= normalization_factor
+    # instance = fill_label_holes(instance)
+
+    # sometimes it helps to downsample the image and instance,
+    # in order to increase the receptive field
+    # instance_ds = instance[
+    #     ::uniform_ds_factor, ::uniform_ds_factor, ::uniform_ds_factor
+    # ]
+    # image_ds = image[::uniform_ds_factor, ::uniform_ds_factor, ::uniform_ds_factor]
+
+    # # but we would still like the downsampled image to be of the same
+    # # size as the original image, which we ensure through padding
+    # dz = image.shape[0] - image_ds.shape[0]
+    # dy = image.shape[1] - image_ds.shape[1]
+    # dx = image.shape[2] - image_ds.shape[2]
+    # pad_width = (
+    #     (dz // 2, dz - dz // 2),
+    #     (dy // 2, dy - dy // 2),
+    #     (dx // 2, dx - dx // 2),
+    # )
+
+    # image = np.pad(image_ds, pad_width)
+    # instance = np.pad(instance_ds, pad_width, "constant", constant_values=background_id)
+    # print(image.shape, instance.shape)
+    d, h, w = image.shape
+    instance_np = np.array(instance, copy=False)
+    object_mask = instance_np > background_id
+    # ensure that background is mapped to 0
+    instance_np[instance_np == background_id] = 0
+    ids = np.unique(instance_np[object_mask])
+    ids = ids[ids != 0]
+    ids_subset = np.random.choice(ids, int(fraction_max_ids * len(ids)), replace=False)
+
+    # Loop over each ID in the subset to process the corresponding instances
+    for j, object_id in enumerate(ids_subset):
+        # Find the coordinates of the current object
+        object_indices = np.where(instance_np == object_id)
+        z_indices, y_indices, x_indices = object_indices
+
+        # Calculate the mean position of the object in each dimension
+        mean_z = np.mean(z_indices)
+        mean_y = np.mean(y_indices)
+        mean_x = np.mean(x_indices)
+
+        # Calculate the starting position for cropping by centering the crop around the mean position
+        start_z = int(np.clip(mean_z - crop_size_z / 2, 0, d - crop_size_z))
+        start_y = int(np.clip(mean_y - crop_size_y / 2, 0, h - crop_size_y))
+        start_x = int(np.clip(mean_x - crop_size_x / 2, 0, w - crop_size_x))
+
+        # Define the ending position for cropping
+        end_z = int(start_z + crop_size_z)
+        end_y = int(start_y + crop_size_y)
+        end_x = int(start_x + crop_size_x)
+
+        # Check if the crop dimensions are as expected
+        crop_dimensions = image[start_z:end_z, start_y:end_y, start_x:end_x].shape
+        expected_dimensions = (crop_size_z, crop_size_y, crop_size_x)
+        print(crop_dimensions, expected_dimensions, crop_dimensions == expected_dimensions)
+        if crop_dimensions == expected_dimensions:
+            # Extract the crop from the raw image and instance mask
+            im_crop = image[start_z:end_z, start_y:end_y, start_x:end_x]
+            instance_crop = instance_np[start_z:end_z, start_y:end_y, start_x:end_x]
+            print(im_crop.shape, instance_crop.shape)   
+
+            # Generate a center image based on the instance crop, this might involve calculating
+            # the geometric center or another method depending on the 'center' variable
+            center_image_crop = generate_center_image_3d(
+                instance_crop,
+                center,
+                ids,
+                one_hot=one_hot,
+                anisotropy_factor=anisotropy_factor,
+                speed_up=speed_up,
+            )
+            print("center img", center_image_crop.shape)
+            print("Saving image to:", image_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j))
+
+            tifffile.imsave(
+                image_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j),
+                im_crop,
+            )
+            if rle_encode:
+                encode(
+                    instance_path + os.path.basename(im)[:-4] + "_{:03d}.csv".format(j),
+                    instance_crop.astype(np.uint16),
+                )
+                encode(
+                    center_image_path
+                    + os.path.basename(im)[:-4]
+                    + "_{:03d}.csv".format(j),
+                    center_image_crop,
+                )
+            else:
+                print("Saving image to:", instance_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j))
+
                 tifffile.imsave(
                     instance_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j),
                     instance_crop.astype(np.uint16),
