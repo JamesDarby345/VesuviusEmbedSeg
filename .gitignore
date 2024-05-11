@@ -12,3 +12,4 @@ dist/*
 pretrained_model
 **.json
 **.pth
+**/inference
