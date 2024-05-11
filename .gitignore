@@ -9,4 +9,6 @@ build/*
 dist/*
 *egg-info
 .vscode
-
+pretrained_model
+**.json
+**.pth
