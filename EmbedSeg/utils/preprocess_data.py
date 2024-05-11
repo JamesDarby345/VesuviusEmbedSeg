@@ -760,6 +760,100 @@ def calculate_object_size(
             np.std(size_list_y).astype(float),
             np.std(size_list_x).astype(float),
         )
+    
+def calculate_object_size_nrrd(data_dir, project_name, train_val_name, mode, one_hot, process_k, background_id=0):
+    """
+    Calculate the mean object size from available label masks in NRRD format.
+
+    Returns tuple with various statistics about object sizes and dimensions.
+    """
+    instance_names = []
+    size_list_x = []
+    size_list_y = []
+    size_list_z = []
+    size_list = []
+    
+    for name in train_val_name:
+        instance_dir = os.path.join(data_dir, name, "instances")
+        instance_names += sorted(glob(os.path.join(instance_dir, "*.nrrd")))
+
+    print(f"Instance names: {instance_names}")
+
+    if process_k is not None:
+        n_images = process_k[0]
+    else:
+        n_images = len(instance_names)
+        
+    for i in tqdm(range(len(instance_names[:n_images])), position=0, leave=True):
+        ma, _ = nrrd.read(instance_names[i])
+        
+        if one_hot and mode == "2d":
+            for z in range(ma.shape[0]):
+                y, x = np.where(ma[z] == 1)
+                size_list_x.append(np.max(x) - np.min(x))
+                size_list_y.append(np.max(y) - np.min(y))
+                size_list.append(len(x))
+        elif not one_hot and mode == "2d":
+            ids = np.unique(ma)
+            ids = ids[ids != background_id]
+            for id in ids:
+                y, x = np.where(ma == id)
+                size_list_x.append(np.max(x) - np.min(x))
+                size_list_y.append(np.max(y) - np.min(y))
+                size_list.append(len(x))
+        elif not one_hot and mode in ["3d", "3d_sliced"]:
+            ids = np.unique(ma)
+            ids = ids[ids != background_id]
+            if process_k is not None:
+                n_ids = process_k[1]
+            else:
+                n_ids = len(ids)
+            for id in tqdm(ids[:n_ids], position=0, leave=True):
+                z, y, x = np.where(ma == id)
+                size_list_z.append(np.max(z) - np.min(z))
+                size_list_y.append(np.max(y) - np.min(y))
+                size_list_x.append(np.max(x) - np.min(x))
+                size_list.append(len(x))
+        elif not one_hot and mode == "3d_ilp":
+            for z in range(ma.shape[0]):
+                ids = np.unique(ma[z])
+                ids = ids[ids != background_id]
+                for id in ids:
+                    y, x = np.where(ma[z] == id)
+                    size_list_y.append(np.max(y) - np.min(y))
+                    size_list_x.append(np.max(x) - np.min(x))
+                    size_list.append(len(x))
+
+    # Aggregate results and print
+    return compile_results(project_name, size_list, size_list_x, size_list_y, size_list_z, mode)
+
+def compile_results(project_name, size_list, size_list_x, size_list_y, size_list_z, mode):
+    results = (
+        np.min(size_list).astype(float),
+        np.mean(size_list).astype(float),
+        np.max(size_list).astype(float),
+        np.mean(size_list_x).astype(float),
+        np.std(size_list_x).astype(float),
+        np.mean(size_list_y).astype(float),
+        np.std(size_list_y).astype(float),
+        np.mean(size_list_z).astype(float) if mode in ["3d", "3d_sliced"] else None,
+        np.std(size_list_z).astype(float) if mode in ["3d", "3d_sliced"] else None,
+    )
+    
+    print_stats(project_name, results, mode)
+    return results
+
+def print_stats(project_name, results, mode):
+    print(f"Minimum object size of the `{project_name}` dataset is equal to {results[0]}")
+    print(f"Mean object size of the `{project_name}` dataset is equal to {results[1]}")
+    print(f"Maximum object size of the `{project_name}` dataset is equal to {results[2]}")
+    print(f"Average object size of the `{project_name}` dataset along `x` = {results[3]:.3f}")
+    print(f"Std. dev object size of the `{project_name}` dataset along `x` = {results[4]:.3f}")
+    print(f"Average object size of the `{project_name}` dataset along `y` = {results[5]:.3f}")
+    print(f"Std. dev object size of the `{project_name}` dataset along `y` = {results[6]:.3f}")
+    if mode in ["3d", "3d_sliced"]:
+        print(f"Average object size of the `{project_name}` dataset along `z` = {results[7]:.3f}")
+        print(f"Std. dev object size of the `{project_name}` dataset along `z` = {results[8]:.3f}")
 
 
 def get_gpu_memory():
@@ -893,6 +987,80 @@ def calculate_max_eval_image_size(
         )
         return max_z.astype(float), max_y.astype(float), max_x.astype(float)
 
+def calculate_max_eval_image_size_nrrd(
+    data_dir, project_name, test_name, mode, anisotropy_factor=1.0, scale_factor=4.0
+):
+    """
+    Identifies the tile size to be used during training and evaluation for .nrrd files.
+    """
+
+    image_names = []
+    size_z_list = []
+    size_y_list = []
+    size_x_list = []
+
+    for name in test_name:
+        instance_dir = os.path.join(data_dir, name, "volumes")
+        image_names += sorted(glob(os.path.join(instance_dir, "*.nrrd")))
+
+    for i in tqdm(range(len(image_names)), position=0, leave=True):
+        im, _ = nrrd.read(image_names[i])
+        if mode == "2d":
+            size_y_list.append(im.shape[0])
+            size_x_list.append(im.shape[1])
+        elif mode in ["3d", "3d_sliced", "3d_ilp"]:
+            size_z_list.append(im.shape[0])
+            size_y_list.append(im.shape[1])
+            size_x_list.append(im.shape[2])
+
+    return calculate_tile_size(project_name, mode, size_z_list, size_y_list, size_x_list)
+
+def calculate_tile_size(project_name, mode, size_z_list, size_y_list, size_x_list):
+    """
+    Calculate and return tile sizes based on the image dimensions.
+    """
+    def round_up_8(x):
+        return int(np.ceil(x / 8.0)) * 8
+
+    if mode in ["2d", "3d_ilp", "3d_sliced"]:
+        max_y = np.max(size_y_list)
+        max_x = np.max(size_x_list)
+        max_y, max_x = round_up_8(max_y), round_up_8(max_x)
+        max_x_y = np.maximum(max_x, max_y)
+
+        max_x, max_y = max_x_y, max_x_y
+        print(
+            "Tile size of the `{}` dataset set equal to ({}, {})".format(
+                project_name, max_y, max_x
+            )
+        )
+        if mode == "3d_sliced":
+            return float(max_y), float(max_y), float(max_x)
+        else:
+            return None, float(max_y), float(max_x)
+    elif mode == "3d":
+        max_z = np.max(size_z_list)
+        max_y = np.max(size_y_list)
+        max_x = np.max(size_x_list)
+
+        max_z = round_up_8(max_z)
+        max_y = round_up_8(max_y)
+        max_x = round_up_8(max_x)
+
+        max_x_y = np.maximum(max_x, max_y)
+
+        max_x = max_x_y
+        max_y = max_x_y
+        max_z = max_z
+
+        print(
+            "Tile size of the `{}` dataset set equal to (n_z = {}, n_y = {}, n_x = {})".format(
+                project_name, max_z, max_y, max_x
+            )
+        )
+        return float(max_z), float(max_y), float(max_x)
+
+
 
 def calculate_avg_background_intensity(
     data_dir, project_name, train_val_name, one_hot, background_id=0
@@ -959,6 +1127,64 @@ def calculate_avg_background_intensity(
             )
         )
     return np.mean(statistics, 0).tolist()
+
+def calculate_avg_background_intensity_nrrd(
+    data_dir, project_name, train_val_name, one_hot, background_id=0
+):
+    """
+    Calculates the average intensity in the regions of the raw image
+    which corresponds to the background label in NRRD format.
+
+    Parameters
+    -------
+    data_dir: str
+        Path to directory containing all data
+    project_name: str
+        Path to directory containing project-specific images and instances
+    train_val_name: str
+        One of 'train' or 'val'
+    one_hot: bool
+        Set to True, if instances are encoded in a one-hot fashion
+    background_id: int
+         Label corresponding to the background
+
+    Returns
+    -------
+        float
+        Average background intensity of the dataset
+    """
+
+    instance_names = []
+    image_names = []
+    for name in train_val_name:
+        instance_dir = os.path.join(data_dir, name, "instances")
+        image_dir = os.path.join(data_dir, name, "volumes")
+        instance_names += sorted(glob(os.path.join(instance_dir, "*.nrrd")))
+        image_names += sorted(glob(os.path.join(image_dir, "*.nrrd")))
+
+    statistics = []
+    for i in tqdm(range(len(instance_names)), position=0, leave=True):
+        ma, _ = nrrd.read(instance_names[i])  # Read mask file
+        im, _ = nrrd.read(image_names[i])    # Read image file
+        if one_hot:
+            bg_mask = ma == 0
+        else:
+            bg_mask = ma == background_id
+
+        if im.ndim == ma.ndim:
+            statistics.append(np.mean(im[bg_mask]))
+        elif im.ndim == ma.ndim + 1:  # Multi-channel image, average across channels
+            for c in range(im.shape[0]):  # Assuming channel-first format
+                statistics.append(np.mean(im[c][bg_mask]))
+
+    average_intensity = np.mean(statistics)
+    print(
+        "Average background intensity of the `{}` dataset set equal to {:.3f}".format(
+            project_name, average_intensity
+        )
+    )
+
+    return average_intensity
 
 
 def get_data_properties(
@@ -1115,7 +1341,7 @@ def get_data_properties_nrrd(
         data_properties_dir["stdev_object_size_z"],
         data_properties_dir["stdev_object_size_y"],
         data_properties_dir["stdev_object_size_x"],
-    ) = calculate_object_size(
+    ) = calculate_object_size_nrrd(
         data_dir,
         project_name,
         train_val_name,
@@ -1128,7 +1354,7 @@ def get_data_properties_nrrd(
         data_properties_dir["n_z"],
         data_properties_dir["n_y"],
         data_properties_dir["n_x"],
-    ) = calculate_max_eval_image_size(
+    ) = calculate_max_eval_image_size_nrrd(
         data_dir=data_dir,
         project_name=project_name,
         test_name=test_name,
@@ -1138,7 +1364,7 @@ def get_data_properties_nrrd(
     data_properties_dir["one_hot"] = one_hot
     data_properties_dir[
         "avg_background_intensity"
-    ] = calculate_avg_background_intensity(
+    ] = calculate_avg_background_intensity_nrrd(
         data_dir, project_name, train_val_name, one_hot, background_id=background_id
     )
     data_properties_dir["project_name"] = project_name

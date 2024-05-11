@@ -9,5 +9,5 @@ build/*
 dist/*
 *egg-info
 .vscode
-/manually_labelled_cubes
+/labelled_cubes
 .DS_Store
