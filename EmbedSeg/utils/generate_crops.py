@@ -640,23 +640,33 @@ def process_3d(
     ids = np.unique(instance_np[object_mask])
     ids = ids[ids != 0]
     ids_subset = np.random.choice(ids, int(fraction_max_ids * len(ids)), replace=False)
-    # loop over instances
-    for j, id in enumerate(ids_subset):
-        z, y, x = np.where(instance_np == id)
-        zm, ym, xm = np.mean(z), np.mean(y), np.mean(x)
-        kk = int(np.clip(zm - crop_size_z / 2, 0, d - crop_size_z))
-        jj = int(np.clip(ym - crop_size_y / 2, 0, h - crop_size_y))
-        ii = int(np.clip(xm - crop_size_x / 2, 0, w - crop_size_x))
+    # Iterate over each unique ID in the subset of IDs to process corresponding instances.
+    for j, object_id in enumerate(ids_subset):
+        # Find all the coordinates of the current object in the 3D instance array.
+        z_coords, y_coords, x_coords = np.where(instance_np == object_id)
+        
+        # Calculate the mean coordinates to determine the geometric center of the object.
+        center_z = np.mean(z_coords)
+        center_y = np.mean(y_coords)
+        center_x = np.mean(x_coords)
+        
+        # Determine the starting index for cropping by ensuring the crop is centered at the mean coordinates.
+        # Use np.clip to ensure the crop dimensions don't exceed the bounds of the image.
+        start_z = int(np.clip(center_z - crop_size_z / 2, 0, d - crop_size_z))
+        start_y = int(np.clip(center_y - crop_size_y / 2, 0, h - crop_size_y))
+        start_x = int(np.clip(center_x - crop_size_x / 2, 0, w - crop_size_x))
+        
+        # Calculate the end indices for the crop.
+        end_z = start_z + crop_size_z
+        end_y = start_y + crop_size_y
+        end_x = start_x + crop_size_x
 
-        if image[
-            kk : kk + crop_size_z, jj : jj + crop_size_y, ii : ii + crop_size_x
-        ].shape == (crop_size_z, crop_size_y, crop_size_x):
-            im_crop = image[
-                kk : kk + crop_size_z, jj : jj + crop_size_y, ii : ii + crop_size_x
-            ]
-            instance_crop = instance_np[
-                kk : kk + crop_size_z, jj : jj + crop_size_y, ii : ii + crop_size_x
-            ]
+        # Extract the crop from the image if the resulting dimensions match the desired crop size.
+        if image[start_z:end_z, start_y:end_y, start_x:end_x].shape == (crop_size_z, crop_size_y, crop_size_x):
+            image_crop = image[start_z:end_z, start_y:end_y, start_x:end_x]
+            instance_crop = instance_np[start_z:end_z, start_y:end_y, start_x:end_x]
+            
+            # Generate a center image crop, which might be used for visualizations or further analysis.
             center_image_crop = generate_center_image_3d(
                 instance_crop,
                 center,
@@ -665,30 +675,30 @@ def process_3d(
                 anisotropy_factor=anisotropy_factor,
                 speed_up=speed_up,
             )
+            
+            # Save the cropped image as a TIFF file.
             tifffile.imsave(
-                image_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j),
-                im_crop,
+                os.path.join(image_path, f"{os.path.basename(im)[:-4]}_{j:03d}.tif"),
+                image_crop,
             )
+
+            # Depending on whether RLE encoding is enabled, save the mask as CSV or TIFF.
             if rle_encode:
                 encode(
-                    instance_path + os.path.basename(im)[:-4] + "_{:03d}.csv".format(j),
+                    os.path.join(instance_path, f"{os.path.basename(im)[:-4]}_{j:03d}.csv"),
                     instance_crop.astype(np.uint16),
                 )
                 encode(
-                    center_image_path
-                    + os.path.basename(im)[:-4]
-                    + "_{:03d}.csv".format(j),
+                    os.path.join(center_image_path, f"{os.path.basename(im)[:-4]}_{j:03d}.csv"),
                     center_image_crop,
                 )
             else:
                 tifffile.imsave(
-                    instance_path + os.path.basename(im)[:-4] + "_{:03d}.tif".format(j),
+                    os.path.join(instance_path, f"{os.path.basename(im)[:-4]}_{j:03d}.tif"),
                     instance_crop.astype(np.uint16),
                 )
                 tifffile.imsave(
-                    center_image_path
-                    + os.path.basename(im)[:-4]
-                    + "_{:03d}.tif".format(j),
+                    os.path.join(center_image_path, f"{os.path.basename(im)[:-4]}_{j:03d}.tif"),
                     center_image_crop,
                 )
 
