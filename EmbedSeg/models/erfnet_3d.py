@@ -79,6 +79,7 @@ class non_bottleneck_1d(nn.Module):
         output = F.relu(output)
         output = self.conv1x1x3_1(output)
         # TODO think about adding a relu here!
+        output = F.relu(output)
 
         output = self.bn1(output)
         output = F.relu(output)
@@ -111,10 +112,10 @@ class Encoder(nn.Module):
         self.layers.append(DownsamplerBlock(64, 128))
 
         for x in range(0, 2):  # 2 times
-            self.layers.append(non_bottleneck_1d(128, 0.3, 2))
-            self.layers.append(non_bottleneck_1d(128, 0.3, 4))
-            self.layers.append(non_bottleneck_1d(128, 0.3, 8))
-            self.layers.append(non_bottleneck_1d(128, 0.3, 16))
+            self.layers.append(non_bottleneck_1d(128, 0.05, 2))
+            self.layers.append(non_bottleneck_1d(128, 0.05, 4))
+            self.layers.append(non_bottleneck_1d(128, 0.05, 8))
+            self.layers.append(non_bottleneck_1d(128, 0.05, 16))
 
         self.output_conv = nn.Conv3d(
             128, num_classes, 1, stride=1, padding=0, bias=True

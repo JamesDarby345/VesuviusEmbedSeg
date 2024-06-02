@@ -62,9 +62,9 @@ def create_dataset_dict(
                     "opts": {
                         "keys": ("image", "instance", "label", "center_image"),
                         "type": (
-                            torch.FloatTensor,
                             torch.ShortTensor,
-                            torch.ShortTensor,
+                            torch.uint8,
+                            torch.uint8,
                             torch.BoolTensor,
                         ),
                     },
@@ -87,9 +87,9 @@ def create_dataset_dict(
                     "opts": {
                         "keys": ("image", "instance", "label", "center_image"),
                         "type": (
-                            torch.FloatTensor,
-                            torch.ShortTensor,
-                            torch.ShortTensor,
+                            torch.uint8,
+                            torch.uint8,
+                            torch.uint8,
                             torch.BoolTensor,
                         ),
                     },
@@ -340,7 +340,7 @@ def create_test_configs_dict(
                             "opts": {
                                 "keys": ("image", "instance", "label"),
                                 "type": (
-                                    torch.FloatTensor,
+                                    torch.ShortTensor,
                                     torch.ShortTensor,
                                     torch.ShortTensor,
                                 ),

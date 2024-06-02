@@ -2,6 +2,8 @@ import os
 import shutil
 
 import torch
+from torch.cuda.amp import autocast, GradScaler
+
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
@@ -227,6 +229,12 @@ def train_vanilla(
 
     return loss_meter.avg
 
+def prepare_model_for_mixed_precision(model):
+    for module in model.modules():
+        if isinstance(module, torch.nn.Conv3d):  # You can add more layer types here if needed
+            if module.bias is not None:
+                module.bias.data = module.bias.data.half()  # Convert bias to float16
+    return model
 
 def train_3d(virtual_batch_multiplier, one_hot, n_sigma, args, device):
     """Trains 3D Model with virtual multiplier
@@ -259,27 +267,36 @@ def train_3d(virtual_batch_multiplier, one_hot, n_sigma, args, device):
 
     # define meters
     loss_meter = AverageMeter()
+    scaler = GradScaler()
+    # Prepare your model
     # put model into training mode
     model.train()
+    
     for param_group in optimizer.param_groups:
         print("learning rate: {}".format(param_group["lr"]))
 
-    optimizer.zero_grad()  # Reset gradients tensors
+    
     for i, sample in enumerate(tqdm(train_dataset_it)):
+        optimizer.zero_grad()  # Reset gradients tensors
         im = sample["image"]
+        # print("im shape and dtype", im.shape, im.dtype)
         im = im.to(device)
         instances = sample["instance"].squeeze(1).to(device)
         class_labels = sample["label"].squeeze(1).to(device)
         center_images = sample["center_image"].squeeze(1).to(device)
-        output = model(im)  # Forward pass
+        with autocast():
+            output = model(im)  # Forward pass
 
-        loss = criterion(output, instances, class_labels, center_images, **args)
-        loss = loss / virtual_batch_multiplier  # Normalize our loss (if averaged)
-        loss = loss.mean()
-        loss.backward()  # Backward pass
+            loss = criterion(output, instances, class_labels, center_images, **args)
+            loss = loss / virtual_batch_multiplier  # Normalize our loss (if averaged)
+            loss = loss.mean()
+        scaler.scale(loss).backward()  # Backward pass
         if (i + 1) % virtual_batch_multiplier == 0:
             # Wait for several backward steps
-            optimizer.step()  # Now we can do an optimizer step
+            # Clip gradients to prevent overflow
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer) # Now we can do an optimizer step
+            scaler.update()
             optimizer.zero_grad()  # Reset gradients tensors
         loss_meter.update(loss.item())
     return loss_meter.avg * virtual_batch_multiplier
@@ -612,58 +629,65 @@ def val_vanilla(
 
 
 def val_3d(virtual_batch_multiplier, one_hot, n_sigma, args, device):
-    """Validates a 3D Model with virtual multiplier
-
-    Virtual batching code inspired from:
-    https://medium.com/huggingface/training-larger-batches-practical-
-    tips-on-1-gpu-multi-gpu-distributed-setups-ec88c3e51255
+    """
+    Validates a 3D Model with virtual multiplier using mixed precision.
 
     Parameters
     ----------
     virtual_batch_multiplier : int
-        Set to 1 by default. Effective batch size is
-        product of virtual_batch_multiplier and batch-size
+        Effective batch size is the product of virtual_batch_multiplier and batch size.
     one_hot : bool
-        In case the GT labels are available in one-hot fashion,
-        this parameter is set equal to True
-        This parameter is not relevant for 3D data,
-        and will be deprecated in a future code update
+        In case the GT labels are available in one-hot fashion, set to True.
     n_sigma: int
-        Should be equal to 3 for a 3D model
+        Should be equal to 3 for a 3D model.
     args: dictionary
-
+        Additional arguments for the loss function.
     device: torch.device
+        Device on which to perform computations.
 
     Returns
     -------
     tuple: (float, float)
         Average loss, Average IoU
     """
-    # define meters
+    # Define meters for loss and IoU
     loss_meter, iou_meter = AverageMeter(), AverageMeter()
-    # put model into eval mode
+
+    # Set model to evaluation mode
     model.eval()
+
+    # Disable gradient computation for validation
     with torch.no_grad():
         for i, sample in enumerate(tqdm(val_dataset_it)):
             im = sample["image"].to(device)
+            # print("Validation im shape and dtype", im.shape, im.dtype)
             instances = sample["instance"].squeeze(1).to(device)
             class_labels = sample["label"].squeeze(1).to(device)
             center_images = sample["center_image"].squeeze(1).to(device)
-            output = model(im)
-            loss = criterion(
-                output,
-                instances,
-                class_labels,
-                center_images,
-                **args,
-                iou=True,
-                iou_meter=iou_meter
-            )
-            loss = loss.mean()
-            loss = loss / virtual_batch_multiplier
-            loss_meter.update(loss.item())
 
-    return loss_meter.avg * virtual_batch_multiplier, iou_meter.avg
+            # Use autocast to perform inference in mixed precision
+            with autocast():
+                output = model(im)
+                loss = criterion(
+                    output,
+                    instances,
+                    class_labels,
+                    center_images,
+                    **args,
+                    iou=True,
+                    iou_meter=iou_meter
+                )
+                loss = loss.mean()
+
+            # Adjust loss for the accumulated gradient calculations
+            adjusted_loss = loss.item() / virtual_batch_multiplier
+            loss_meter.update(adjusted_loss)
+
+    # Calculate average loss and IoU, considering the virtual batch size
+    average_loss = loss_meter.avg * virtual_batch_multiplier
+    average_iou = iou_meter.avg
+
+    return average_loss, average_iou
 
 
 def val_vanilla_3d(
@@ -682,106 +706,72 @@ def val_vanilla_3d(
     args,
     device,
 ):
-    """Validates a 3D Model without virtual multiplier.
+    """
+    Validates a 3D Model without virtual multiplier using mixed precision.
 
     Parameters
     ----------
     display : bool
-        Displays input, GT, model predictions during training
+        Displays input, GT, model predictions during training.
     display_embedding : bool
-        Displays embeddings for train (crop) images
+        Displays embeddings for train (crop) images.
     display_it: int
         Displays a new training image, the corresponding GT
-        and model prediction every `display_it` crop images
+        and model prediction every `display_it` crop images.
     one_hot: bool
-        In case the GT labels are available in one-hot fashion,
-        this parameter is set equal to True
-        This parameter is not relevant for 3D data
-        and will be deprecated in a future code update
-    grid_x: int
-        Number of pixels along x dimension which constitute a tile
-    grid_y: int
-        Number of pixels along y dimension which constitute a tile
-    grid_z: int
-        Number of pixels along z dimension which constitute a tile
-    pixel_x: float
-        The grid length along x is mapped to `pixel_x`.
-        For example, if grid_x = 1024 and pixel_x = 1.0, then each dX
-        or the spacing between consecutive pixels
-        along the x dimension is set equal to pixel_x/grid_x = 1.0/1024
-    pixel_y: float
-        The grid length along y is mapped to `pixel_y`.
-        For example, if grid_y = 1024 and pixel_y = 1.0, then each dY
-        or the spacing between consecutive pixels
-        along the y dimension is set equal to pixel_y/grid_y = 1.0/1024
-    pixel_z: float
-        The grid length along z is mapped to `pixel_z`.
-        For example, if grid_z = 1024 and pixel_z = 1.0, then each dY
-        or the spacing between consecutive pixels
-        along the z dimension is set equal to pixel_z/grid_z = 1.0/1024
+        Set to True if GT labels are available in one-hot fashion.
+    grid_x, grid_y, grid_z: int
+        Number of pixels along each dimension which constitute a tile.
+    pixel_x, pixel_y, pixel_z: float
+        Grid length along each dimension mapped to physical dimensions.
     n_sigma: int
-        Should be set equal to 3 for a 3D model
+        Should be equal to 3 for a 3D model.
     zslice: int
-        If `display` = True, then the the raw image at z = z_slice
-        is displayed during training
+        If `display` = True, then the raw image at z = z_slice is displayed during training.
     args: dictionary
-
+        Additional arguments for the loss function.
     device: torch.device
+        Device on which to perform computations.
 
     Returns
     -------
     tuple: (float, float)
-        Average loss, Average IoU
+        Average loss, Average IoU.
     """
-    # define meters
+    # Define meters for loss and IoU
     loss_meter, iou_meter = AverageMeter(), AverageMeter()
-    # put model into eval mode
+
+    # Set model to evaluation mode
     model.eval()
+
     with torch.no_grad():
         for i, sample in enumerate(tqdm(val_dataset_it)):
-            im = sample["image"].to(device)  # BCZYX
-            instances = sample["instance"].squeeze(1).to(device)  # BZYX
-            class_labels = sample["label"].squeeze(1).to(device)  # BZYX
-            center_images = sample["center_image"].squeeze(1).to(device)  # BZYX
-            output = model(im)
-            loss = criterion(
-                output,
-                instances,
-                class_labels,
-                center_images,
-                **args,
-                iou=True,
-                iou_meter=iou_meter
-            )
-            loss = loss.mean()
-            if display and i % display_it == 0:
-                with torch.no_grad():
-                    visualizer.display(im[0, 0, zslice], key="image", title="Image")
-                    predictions = cluster.cluster_with_gt(
-                        output[0], instances[0], n_sigma=n_sigma
-                    )
-                    if one_hot:
-                        instance = invert_one_hot(instances[0].cpu().detach().numpy())
-                        visualizer.display(
-                            instance, key="groundtruth", title="Ground Truth"
-                        )  # TODO
-                        instance_ids = np.arange(instances.size(1))
-                    else:
-                        visualizer.display(
-                            instances[0, zslice].cpu(),
-                            key="groundtruth",
-                            title="Ground Truth",
-                        )  # TODO
-                        instance_ids = instances[0].unique()
-                        instance_ids = instance_ids[instance_ids != 0]
+            im = sample["image"].to(device)
+            instances = sample["instance"].squeeze(1).to(device)
+            class_labels = sample["label"].squeeze(1).to(device)
+            center_images = sample["center_image"].squeeze(1).to(device)
 
-                    visualizer.display(
-                        predictions.cpu()[zslice, ...],
-                        key="prediction",
-                        title="Prediction",
-                    )  # TODO
+            # Use autocast to perform inference in mixed precision
+            with autocast():
+                output = model(im)
+                loss = criterion(
+                    output,
+                    instances,
+                    class_labels,
+                    center_images,
+                    **args,
+                    iou=True,
+                    iou_meter=iou_meter
+                )
+                loss = loss.mean()
 
             loss_meter.update(loss.item())
+
+            # Display visualizations if enabled
+            if display and i % display_it == 0:
+                visualizer.display_sample(
+                    im, instances, class_labels, center_images, output, zslice, n_sigma
+                )
 
     return loss_meter.avg, iou_meter.avg
 
@@ -833,6 +823,8 @@ def save_checkpoint(
     """
     print("=> saving checkpoint")
     file_name = os.path.join(save_dir, name)
+    if epoch % 100 == 0 and epoch != 0:
+        file_name = os.path.join(save_dir, str(epoch)+"_"+name)
     torch.save(state, file_name)
     if save_checkpoint_frequency is not None:
         if epoch % int(save_checkpoint_frequency) == 0:
@@ -896,6 +888,7 @@ def begin_training(
     train_dataset = get_dataset(
         train_dataset_dict["name"], train_dataset_dict["kwargs"]
     )
+    print("train_dataset:", train_dataset[0].get("image").dtype)
     train_dataset_it = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=train_dataset_dict["batch_size"],

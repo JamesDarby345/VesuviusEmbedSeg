@@ -9,6 +9,7 @@ import tifffile
 from scipy.ndimage import zoom
 from skimage.segmentation import relabel_sequential
 from torch.utils.data import Dataset
+import torch
 
 from EmbedSeg.utils.generate_crops import (
     normalize_min_max_percentile,
@@ -104,8 +105,8 @@ class ThreeDimensionalDataset(Dataset):
         size=None,
         transform=None,
         one_hot=False,
-        norm="min-max-percentile",
-        normalization=False,
+        norm="min-max-percentil",
+        normalization=True,
         data_type="8-bit",
         anisotropy_factor=1.0,
         sliced_mode=False,
@@ -174,6 +175,7 @@ class ThreeDimensionalDataset(Dataset):
 
         # load image
         image = tifffile.imread(self.image_list[index])  # ZYX
+        # print("Image shape pre norm, dtype, norm: ", image.shape, image.dtype, self.normalization, self.norm, image.min(), image.max(), self.type)
         if self.normalization and self.norm == "min-max-percentile":
             image = normalize_min_max_percentile(image, 1, 99.8, axis=(0, 1, 2))
         elif self.normalization and self.norm == "mean-std":
@@ -192,7 +194,13 @@ class ThreeDimensionalDataset(Dataset):
                 :: self.uniform_ds_factor,
                 :: self.uniform_ds_factor,
             ]
-        image = self.convert_zyx_to_czyx(image, key="image")  # CZYX
+        # Normalize to [0, 1]
+        normalized_image = (image - image.min()) / (image.max() - image.min())
+        # image = (normalized_image * 255).astype(np.uint8)
+        # print("Image shape after norm: ", image.shape, image.dtype, image.min(), image.max())
+        image = self.convert_zyx_to_czyx(normalized_image, key="image")  # CZYX
+        # print("Image shape after czyx: ", image.shape, image.dtype, image.min(), image.max())
+
         sample["image"] = image  # CZYX
         sample["im_name"] = self.image_list[index]
         if len(self.instance_list) != 0:
@@ -204,11 +212,15 @@ class ThreeDimensionalDataset(Dataset):
                 instance = tifffile.imread(self.instance_list[index])  # ZYX
 
             instance, label = self.decode_instance(instance, self.one_hot, self.bg_id)
+            instance = instance.astype(np.int8)
             if self.type == "test" and self.sliced_mode:
                 instance = zoom(instance, (self.anisotropy_factor, 1, 1), order=0)
                 label = zoom(label, (self.anisotropy_factor, 1, 1), order=0)
             instance = self.convert_zyx_to_czyx(instance, key="instance")  # CZYX
             label = self.convert_zyx_to_czyx(label, key="label")  # CZYX
+            # print("Label shape: ", label.shape, label.dtype, label.min(), label.max())
+            # print("Instance shape: ", instance.shape, instance.dtype, instance.min(), instance.max())
+
             sample["instance"] = instance
             sample["label"] = label
         if len(self.center_image_list) != 0:
@@ -225,19 +237,25 @@ class ThreeDimensionalDataset(Dataset):
             center_image = self.convert_zyx_to_czyx(
                 center_image, key="center_image"
             )  # CZYX
+            # print("Center image shape: ", center_image.shape, center_image.dtype, center_image.min(), center_image.max())   
             sample["center_image"] = center_image
 
         # transform
         if self.transform is not None:
-            return self.transform(sample)
+            # print("Sample shape before transform: ", sample["image"].shape, sample["image"].dtype, sample["image"].min(), sample["image"].max())
+            sample = self.transform(sample)
+            sample["image"] = (sample["image"] - sample["image"].min()) / (sample["image"].max() - sample["image"].min())
+            sample["image"] = (sample["image"]).to(torch.float16)
+            # print("Sample shape after transform: ", sample["image"].shape, sample["image"].dtype, sample["image"].min(), sample["image"].max())
+            return sample
         else:
             return sample
 
     @classmethod
     def decode_instance(cls, pic, one_hot, bg_id=None):
-        pic = np.array(pic, copy=False, dtype=np.uint16)
+        pic = np.array(pic, copy=False, dtype=np.uint8)
         instance_map = np.zeros(
-            (pic.shape[0], pic.shape[1], pic.shape[2]), dtype=np.int16
+            (pic.shape[0], pic.shape[1], pic.shape[2]), dtype=np.int8
         )
         class_map = np.zeros((pic.shape[0], pic.shape[1], pic.shape[2]), dtype=np.uint8)
 

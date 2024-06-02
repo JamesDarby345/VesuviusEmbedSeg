@@ -14,6 +14,7 @@ from EmbedSeg.utils.test_time_augmentation import apply_tta_2d, apply_tta_3d
 from scipy.ndimage import zoom
 from scipy.optimize import minimize_scalar, linear_sum_assignment
 from skimage.segmentation import relabel_sequential
+from torch.cuda.amp import autocast
 
 torch.backends.cudnn.benchmark = True
 
@@ -868,58 +869,63 @@ def predict_3d(
     device,
 ):
     """
+    Predicts instances and seed maps from 3D images using a deep learning model with mixed precision.
 
     Parameters
     ----------
     im : PyTorch Tensor
-        BZCYX
-
+        Image tensor in BZCYX format.
     model: PyTorch model
-
+        The model to use for prediction.
     tta: bool
-        If True, then Test-Time Augmentation is on, otherwise off
+        If True, applies Test-Time Augmentation.
     cluster_fast: bool
-        If True, then the cluster.cluster() is used
-        If False, then cluster.cluster_local_maxima() is used
+        Toggle between fast clustering and local maxima based clustering.
     n_sigma: int
-        This should be set equal to `3` for a 3D setting
+        Used in clustering, typically set to 3 for 3D.
     fg_thresh: float
-        This should be set equal to `0.5` by default
+        Foreground threshold for clustering.
     seed_thresh: float
-        This should be set equal to `0.9` by default
+        Seediness threshold for starting to cluster.
     min_mask_sum: int
-        Only start creating instances,
-        if there are at least `min_mask_sum` pixels in foreground!
+        Minimum sum of foreground masks required to start clustering.
     min_unclustered_sum: int
-        Stop when the number of seed candidates are less than `min_unclustered_sum`
+        Minimum sum below which clustering is stopped.
     min_object_size: int
-        Predicted Objects below this threshold are ignored
-
-    cluster: Object of class `Cluster_3d`
+        Minimum size below which detected objects are discarded.
+    cluster: Cluster_3d
+        Clustering utility object.
+    device: torch.device
+        Device on which to perform computations.
 
     Returns
     -------
-    instance_map: PyTorch Tensor
-        ZYX
-    seed_map: PyTorch Tensor
-        ZYX
+    instance_map : PyTorch Tensor
+        Tensor of instance maps in ZYX format.
+    seed_map : PyTorch Tensor
+        Tensor of seediness maps in ZYX format.
     """
     im, diff_x, diff_y, diff_z = pad_3d(im)
-
-    if tta:
-        for iter in tqdm(range(16), position=0, leave=True):
-            if iter == 0:
-                output_average = apply_tta_3d(im, model, iter)
-            else:
-                output_average = (
-                    1
-                    / (iter + 1)
-                    * (output_average * iter + apply_tta_3d(im, model, iter))
-                )  # iter
-        output = torch.from_numpy(output_average).float().to(device)
+    # seed_thresh = 0.1
+    # fg_thresh = 0.2
+    print("seed thresh", seed_thresh, "fg thresh", fg_thresh, "min mask sum", min_mask_sum, "min unclustered sum", min_unclustered_sum, "min object size", min_object_size)
+    # Use autocast for the forward pass if not using TTA
+    if not tta:
+        with autocast():
+            output = model(im)
     else:
-        output = model(im)
+        output_average = None
+        for iter in tqdm(range(16), position=0, leave=True):
+            with autocast():
+                tta_output = apply_tta_3d(im, model, iter)
+            if output_average is None:
+                output_average = tta_output
+            else:
+                output_average = 1 / (iter + 1) * (output_average * iter + tta_output)
 
+        output = torch.from_numpy(output_average).float().to(device)
+
+    # Clustering
     if cluster_fast:
         instance_map = cluster.cluster(
             output[0],
@@ -940,8 +946,8 @@ def predict_3d(
             min_object_size=min_object_size,
         )
     seed_map = torch.sigmoid(output[0, -1, ...])
-    # unpad instance_map, seed_map
 
+    # Unpadding
     if diff_z != 0:
         instance_map = instance_map[:-diff_z, :, :]
         seed_map = seed_map[:-diff_z, :, :]
@@ -951,6 +957,7 @@ def predict_3d(
     if diff_x != 0:
         instance_map = instance_map[:, :, :-diff_x]
         seed_map = seed_map[:, :, :-diff_x]
+
     return instance_map, seed_map
 
 
@@ -1411,7 +1418,12 @@ def test_3d(fg_thresh, *args):
                 uniform_ds_factor,
                 order=0,
             )
-            seed_map = zoom(seed_map.cpu().detach().numpy(), uniform_ds_factor)
+
+            # Convert seed_map to float32 before zooming
+            seed_map = zoom(
+                seed_map.cpu().detach().numpy().astype(np.float32),
+                uniform_ds_factor
+            )
 
             if "instance" in sample:
                 instances = sample["instance"].squeeze()  # Z, Y, X

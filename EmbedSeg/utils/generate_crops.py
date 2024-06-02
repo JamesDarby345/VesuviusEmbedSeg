@@ -51,7 +51,7 @@ def fill_label_holes(lbl_img, **kwargs):
 
 
 def normalize_min_max_percentile(
-    x, pmin=3, pmax=99.8, axis=None, clip=False, eps=1e-20, dtype=float
+    x, pmin=3, pmax=99.8, axis=None, clip=False, eps=1e-20, dtype=np.float32
 ):
     """
     Percentile-based image normalization.
@@ -62,7 +62,7 @@ def normalize_min_max_percentile(
     return normalize_mi_ma(x, mi, ma, clip=clip, eps=eps, dtype=dtype)
 
 
-def normalize_mi_ma(x, mi, ma, clip=False, eps=1e-20, dtype=float):
+def normalize_mi_ma(x, mi, ma, clip=False, eps=1e-20, dtype=np.float32):
     """
     Percentile-based image normalization.
     Function taken from StarDist repository  https://github.com/stardist/stardist
@@ -591,8 +591,8 @@ def process_3d(
         os.makedirs(os.path.dirname(center_image_path))
         print("Created new directory : {}".format(center_image_path))
 
-    instance = tifffile.imread(inst).astype(np.uint16)
-    image = tifffile.imread(im).astype(float)
+    instance = tifffile.imread(inst).astype(np.uint8)
+    image = tifffile.imread(im).astype(np.float32)
 
     if norm == "min-max-percentile":
         image = normalize_min_max_percentile(image, 1, 99.8, axis=(0, 1, 2))
@@ -610,6 +610,9 @@ def process_3d(
             else:
                 image /= normalization_factor
     instance = fill_label_holes(instance)
+    print("Image shape after czyx: ", image.shape, image.dtype, image.min(), image.max())
+
+
 
     # sometimes it helps to downsample the image and instance,
     # in order to increase the receptive field
